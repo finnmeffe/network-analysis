@@ -1,0 +1,135 @@
+---
+title: "LEHD Networks"
+output: html_document
+date: "2026-02-03"
+---
+
+## Setup
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+options(scipen = 0, digits = 3)  # controls base R output
+if(!require('pacman')) {
+  install.packages('pacman')
+}
+pacman::p_load(
+  ggplot2, dplyr, tidyverse, data.table, lubridate, ggpubr, skimr, scales, plotly,
+  sf, ggmap, mapview, leaflet, leafsync, patchwork, # for spatial objects and maps
+  igraph, tidygraph, ggraph, sfnetworks, # for networks
+  lehdr, tigris # census query
+)
+```
+
+## Load files
+
+First, load LODES data for origin-destination pairs - "w_tract" for workplace and "h_tract" for residence. Currently, tracts are being used as a geometry aggregate.
+
+```{r}
+lodes.raw <- grab_lodes(
+  "WA",
+  2019,
+  lodes_type = "od",
+  job_type = "JT00",
+  agg_geo = "tract"
+)
+```
+Next, load TIGER shapefiles to match these OD pairs to points in space. Also load in a crosswalk file from https://www.nber.org/research/data/census-core-based-statistical-area-cbsa-federal-information-processing-series-fips-county-crosswalk to filter out the necessary counties for our CBSA.
+
+```{r}
+xwalk.cbsa_fips <- read_csv("https://data.nber.org/cbsa-csa-fips-county-crosswalk/2023/cbsa2fipsxw_2023.csv") %>% 
+  filter(str_detect(cbsatitle, "Seattle"))
+
+# LODES 08 uses 2020 tracts geography
+tiger.raw <- tracts(
+  state = "WA",
+  county = xwalk.cbsa_fips$fipscountycode,
+  year = 2020
+)
+
+tiger.geo_xwalk <- tiger.raw %>% 
+  select(GEOID)
+```
+
+Let's visualize the LODES data. Note that because the constituent counties of the Seattle MSA are so large, it is difficult to actually view the granular tract data. One option is using mapview() to zoom into the tracts of interest.
+
+```{r}
+lodes.commutes <- lodes.raw %>% 
+  filter(w_tract %in% tiger.raw$GEOID & h_tract %in% tiger.raw$GEOID) %>% 
+  select(w_tract,h_tract,S000) %>% 
+  rename(n = S000)
+
+lodes.h <- lodes.commutes %>% 
+  group_by(h_tract) %>% 
+  summarise(n = sum(n)) %>% 
+  arrange(-n) %>% 
+  inner_join(tiger.geo_xwalk, join_by(h_tract == GEOID)) %>% 
+  st_sf() %>% 
+  mutate(log_n = log(n))
+
+lodes.w <- lodes.commutes %>% 
+  group_by(w_tract) %>% 
+  summarise(n = sum(n)) %>% 
+  arrange(-n) %>% 
+  inner_join(tiger.geo_xwalk, join_by(w_tract == GEOID)) %>% 
+  st_sf() %>% 
+  mutate(log_n = log(n))
+
+p1 <- ggplot() +
+  geom_sf(data = lodes.h, aes(fill = log_n))
+
+p2 <- ggplot() +
+  geom_sf(data = lodes.w, aes(fill = log_n))
+
+p1 + p2
+```
+
+Quick aside - notice that the LODES data has 860 tracts, whereas the TIGER data has 863: can quickly inspect those that were not matched to make sure this isn't a systemic error. As you can see, the unmatched tracts are simply water polygons.
+
+```{r}
+missing_tracts <- tiger.geo_xwalk %>% 
+  full_join(lodes.h %>% select(h_tract, n) %>% st_drop_geometry(),
+            by = c("GEOID" = "h_tract")) %>% 
+  filter(is.na(n))
+
+# mapview(missing_tracts)
+# rm(missing_tracts)
+```
+## Network
+
+One option for viewing the network is an adjacency matrix heatmap. p_all demonstrates that there is some clustering (top left), but also some workplace tracts that receive commuters from every residence tracts.
+
+```{r}
+commutes.net <- graph_from_data_frame(lodes.commutes)
+commutes.adj <- as_adjacency_matrix(commutes.net, attr = "n")
+
+p_all <- ggplot(lodes.commutes) +
+  geom_tile(aes(x = factor(w_tract),
+                y = factor(h_tract),
+                fill = log(n))) + 
+  scale_fill_gradient("commutes", low = "darkblue", high = "red") +
+  coord_equal() +
+  theme_bw() + 
+  theme(axis.text.x=element_blank(), axis.ticks.x=element_blank(),
+        axis.text.y=element_blank(), axis.ticks.y=element_blank()) +
+  xlab("w_tract") + ylab("h_tract")
+
+p_all
+```
+
+```{r}
+commutes.net.undir <- as.undirected(commutes.net,
+                                    mode = "collapse", 
+                                    edge.attr.comb = "sum")
+
+# vector just extracts the centrality scores
+V(commutes.net)$eigen <- eigen_centrality(commutes.net.undir,
+                                          weights = E(commutes.net.undir)$n)$vector
+
+commutes.eigen_df <- as_data_frame(commutes.net, what = "vertices")
+
+commutes.eigen_sf <- tiger.geo_xwalk %>% 
+  left_join(commutes.eigen_df, by = c("GEOID" = "name"))
+
+```
+
