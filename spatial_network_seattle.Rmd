@@ -128,8 +128,13 @@ V(commutes.net)$eigen <- eigen_centrality(commutes.net.undir,
 
 commutes.eigen_df <- as_data_frame(commutes.net, what = "vertices")
 
+ggplot() +
+  geom_histogram(data = commutes.eigen_df, aes(x = eigen),
+                 binwidth = 0.01)
+
 commutes.eigen_sf <- tiger.geo_xwalk %>% 
   left_join(commutes.eigen_df, by = c("GEOID" = "name"))
 
+mapview(commutes.eigen_sf, zcol = "eigen")
 ```
 
