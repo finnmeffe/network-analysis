@@ -31,19 +31,21 @@ lodes.raw <- grab_lodes(
   2019,
   lodes_type = "od",
   job_type = "JT00",
-  agg_geo = "tract"
+  agg_geo = "tract",
+  use_cache = TRUE
 )
 ```
 Next, load TIGER shapefiles to match these OD pairs to points in space. Also load in a crosswalk file from https://www.nber.org/research/data/census-core-based-statistical-area-cbsa-federal-information-processing-series-fips-county-crosswalk to filter out the necessary counties for our CBSA.
 
 ```{r}
-xwalk.cbsa_fips <- read_csv("https://data.nber.org/cbsa-csa-fips-county-crosswalk/2023/cbsa2fipsxw_2023.csv") %>% 
-  filter(str_detect(cbsatitle, "Seattle"))
+xwalk.cbsa_fips <- read_csv("https://data.nber.org/cbsa-csa-fips-county-crosswalk/2023/cbsa2fipsxw_2023.csv")
 
 # LODES 08 uses 2020 tracts geography
 tiger.raw <- tracts(
   state = "WA",
-  county = xwalk.cbsa_fips$fipscountycode,
+  county = xwalk.cbsa_fips %>% 
+    filter(str_detect(cbsatitle, "Seattle")) %>% 
+    pull(fipscountycode),
   year = 2020
 )
 
@@ -116,6 +118,7 @@ p_all <- ggplot(lodes.commutes) +
 
 p_all
 ```
+Another method is looking at eigenvector centrality to get a measure of how interconnectedness
 
 ```{r}
 commutes.net.undir <- as.undirected(commutes.net,
@@ -137,4 +140,25 @@ commutes.eigen_sf <- tiger.geo_xwalk %>%
 
 mapview(commutes.eigen_sf, zcol = "eigen")
 ```
+
+Interestingly, Redmond (location of Microsoft campus) has by far the highest eigenvector centrality score, perhaps signalling a reorientation of the commuting gradient away from downtown Seattle. 
+
+A second technique is finding clusters using the Louvain algorithm, which maximizes modularity (note for reference: https://medium.com/data-science-in-your-pocket/community-detection-in-a-graph-using-louvain-algorithm-with-example-7a77e5e4b079)
+
+```{r}
+commutes.cl <- cluster_louvain(commutes.net.undir, resolution = 1)
+names(commutes.cl)
+commutes.cl$membership
+
+commutes.cl_df <- data.frame(id = V(commutes.net)$name,
+                                cl = as.factor(commutes.cl$membership)
+)
+
+commutes.cl_sf <- inner_join(commutes.cl_df, tiger.geo_xwalk, by = join_by(id == GEOID)) %>% 
+  st_sf()
+
+mapview(commutes.cl_sf, zcol = "cl")
+```
+
+
 
